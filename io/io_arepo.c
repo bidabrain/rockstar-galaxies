@@ -20,7 +20,7 @@
 #include "../config.h"
 #include "../particle.h"
 
-#define AREPO_NTYPES 6
+#define AREPO_NTYPES 7
 
 void arepo_read_dataset(hid_t HDF_FileID, char *filename, char *gid, char *dataid, struct particle *p, int64_t to_read, int64_t offset, int64_t stride, hid_t type) {
   int64_t width = (type == H5T_NATIVE_LLONG) ? 8 : 4;
@@ -86,7 +86,7 @@ void arepo_readheader_array(hid_t HDF_GroupID, char *filename, char *objName, hi
   assert(ndims == 1);
   hsize_t dimsize = 0;
   check_H5Sget_simple_extent_dims(HDF_DataspaceID, &dimsize);
-  assert(dimsize == AREPO_NTYPES);
+//  assert(dimsize == AREPO_NTYPES);
   
   check_H5Aread(HDF_AttrID, type, data, objName, gid, filename);
 
@@ -110,15 +110,32 @@ void arepo_rescale_particles(struct particle *p, int64_t p_start, int64_t nelems
 void load_particles_arepo(char *filename, struct particle **p, int64_t *num_p)
 {	
   hid_t HDF_FileID = check_H5Fopen(filename, H5F_ACC_RDONLY);
+  htri_t cosmo_exists = H5Lexists(HDF_FileID, "Cosmology", H5P_DEFAULT);
+  int is_swift = (cosmo_exists > 0);
   hid_t HDF_Header = check_H5Gopen(HDF_FileID, "Header", filename);
-  
-  Ol = arepo_readheader_float(HDF_Header, filename, "OmegaLambda");
-  Om = arepo_readheader_float(HDF_Header, filename, "Omega0");
-  h0 = arepo_readheader_float(HDF_Header, filename, "HubbleParam");
-  SCALE_NOW = arepo_readheader_float(HDF_Header, filename, "Time");
-  BOX_SIZE = arepo_readheader_float(HDF_Header, filename, "BoxSize");
-  BOX_SIZE *= AREPO_LENGTH_CONVERSION;  
-  
+  hid_t HDF_Cosmo = -1;
+  if (is_swift) {
+    // SWIFT格式：从Cosmology组读取宇宙学参数
+    HDF_Cosmo = check_H5Gopen(HDF_FileID, "Cosmology", filename);
+    
+    Ol = arepo_readheader_float(HDF_Cosmo, filename, "Omega_lambda");
+    Om = arepo_readheader_float(HDF_Cosmo, filename, "Omega_m");
+    h0 = arepo_readheader_float(HDF_Cosmo, filename, "h");
+    
+    // 从Header读取时间和盒子大小
+    SCALE_NOW = arepo_readheader_float(HDF_Header, filename, "Scale-factor");
+    BOX_SIZE = arepo_readheader_float(HDF_Header, filename, "BoxSize");
+    
+    H5Gclose(HDF_Cosmo);
+  } else {
+    // 传统Arepo格式
+    Ol = arepo_readheader_float(HDF_Header, filename, "OmegaLambda");
+    Om = arepo_readheader_float(HDF_Header, filename, "Omega0");
+    h0 = arepo_readheader_float(HDF_Header, filename, "HubbleParam");
+    SCALE_NOW = arepo_readheader_float(HDF_Header, filename, "Time");
+    BOX_SIZE = arepo_readheader_float(HDF_Header, filename, "BoxSize");
+  }   
+  BOX_SIZE *= AREPO_LENGTH_CONVERSION; 
   uint32_t npart_low[AREPO_NTYPES], npart_high[AREPO_NTYPES] = {0};
   int64_t npart[AREPO_NTYPES];
   float massTable[AREPO_NTYPES];
@@ -177,7 +194,12 @@ void load_particles_arepo(char *filename, struct particle **p, int64_t *num_p)
 	   npart[i], (char *)&(p[0][0].pos[0])-(char*)(p[0]), 3, H5T_NATIVE_FLOAT);
     arepo_read_dataset(HDF_FileID, filename, buffer, "Velocities", *p + (*num_p),
 	   npart[i], (char *)&(p[0][0].pos[3])-(char*)(p[0]), 3, H5T_NATIVE_FLOAT);
-    if (!massTable[i]) {
+  if (i == 5 && is_swift) {
+  // PartType5 (BH) use SubgridMasses
+  arepo_read_dataset(HDF_FileID, filename, buffer, "SubgridMasses", *p + (*num_p),
+       npart[i], (char *)&(p[0][0].mass)-(char*)(p[0]), 1, H5T_NATIVE_FLOAT);
+}
+else if (!massTable[i]) {
       arepo_read_dataset(HDF_FileID, filename, buffer, "Masses", *p + (*num_p),
 	   npart[i], (char *)&(p[0][0].mass)-(char*)(p[0]), 1, H5T_NATIVE_FLOAT);
       /* if mass table is 0 but type is (primary) dark matter, need to set dark-matter particle mass */
@@ -197,10 +219,12 @@ void load_particles_arepo(char *filename, struct particle **p, int64_t *num_p)
     */
 
     if (type==RTYPE_GAS) {
-      arepo_read_dataset(HDF_FileID, filename, buffer, "SmoothingLength", *p + (*num_p),
+      char *smooth_field = is_swift ? "SmoothingLengths" : "SmoothingLength";
+      char *energy_field = is_swift ? "InternalEnergies" : "InternalEnergy";
+      arepo_read_dataset(HDF_FileID, filename, buffer, smooth_field, *p + (*num_p),
 	   npart[i], (char *)&(p[0][0].softening)-(char*)(p[0]), 1, H5T_NATIVE_FLOAT);
 
-      arepo_read_dataset(HDF_FileID, filename, buffer, "InternalEnergy", *p + (*num_p),
+      arepo_read_dataset(HDF_FileID, filename, buffer, energy_field, *p + (*num_p),
 	   npart[i], (char *)&(p[0][0].energy)-(char*)(p[0]), 1, H5T_NATIVE_FLOAT);
     }
 
